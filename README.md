@@ -30,7 +30,37 @@ A complete Verilog implementation of a floating-point arithmetic unit compliant 
 
 ## Quick Start
 
-### Simulation with Icarus Verilog
+### Prerequisites
+
+Install Icarus Verilog (iverilog):
+```bash
+# Ubuntu/Debian
+sudo apt-get install iverilog
+
+# macOS
+brew install icarus-verilog
+```
+
+### Simulation with Makefile
+
+```bash
+# Run all tests
+make test
+
+# Run only FPU tests
+make test_fpu
+
+# Run addition/subtraction tests
+make test_add_sub
+
+# Clean simulation files
+make clean
+
+# Show help
+make help
+```
+
+### Manual Simulation with Icarus Verilog
 
 ```bash
 # Compile the design
