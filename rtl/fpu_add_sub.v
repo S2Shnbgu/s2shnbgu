@@ -27,14 +27,13 @@ module fpu_add_sub (
     // Internal variables
     reg [7:0]  exp_diff;
     reg [7:0]  larger_exp;
-    reg [23:0] mant_a_full, mant_b_full;  // With implicit leading 1
-    reg [24:0] mant_a_shifted, mant_b_shifted;
-    reg [24:0] mant_sum;
+    reg [24:0] mant_a_full, mant_b_full;  // With implicit leading 1 + extra bit
+    reg [26:0] mant_a_aligned, mant_b_aligned;  // Aligned mantissas with guard bits
+    reg [26:0] mant_result_temp;
     reg        sign_result;
-    reg [7:0]  exp_result;
+    reg [8:0]  exp_result;  // 9 bits to detect overflow/underflow
     reg [22:0] mant_result;
-    reg [4:0]  norm_shift;
-    integer    i;
+    reg [4:0]  leading_zeros;
     
     always @(*) begin
         // Initialize flags
@@ -76,79 +75,127 @@ module fpu_add_sub (
         // Normal operation
         else begin
             // Add implicit leading 1 for normalized numbers
-            mant_a_full = (exp_a != 0) ? {1'b1, mant_a} : {1'b0, mant_a};
-            mant_b_full = (exp_b != 0) ? {1'b1, mant_b} : {1'b0, mant_b};
+            mant_a_full = (exp_a != 0) ? {2'b01, mant_a} : {2'b00, mant_a};
+            mant_b_full = (exp_b != 0) ? {2'b01, mant_b} : {2'b00, mant_b};
             
-            // Determine which exponent is larger
-            if (exp_a > exp_b) begin
+            // Align mantissas - shift smaller one to right
+            if (exp_a >= exp_b) begin
                 larger_exp = exp_a;
                 exp_diff = exp_a - exp_b;
-                mant_a_shifted = {mant_a_full, 1'b0};
-                mant_b_shifted = {mant_b_full, 1'b0} >> exp_diff;
+                mant_a_aligned = {mant_a_full, 2'b00};
+                if (exp_diff < 27)
+                    mant_b_aligned = {mant_b_full, 2'b00} >> exp_diff;
+                else
+                    mant_b_aligned = 27'b0;
             end else begin
                 larger_exp = exp_b;
                 exp_diff = exp_b - exp_a;
-                mant_a_shifted = {mant_a_full, 1'b0} >> exp_diff;
-                mant_b_shifted = {mant_b_full, 1'b0};
+                mant_b_aligned = {mant_b_full, 2'b00};
+                if (exp_diff < 27)
+                    mant_a_aligned = {mant_a_full, 2'b00} >> exp_diff;
+                else
+                    mant_a_aligned = 27'b0;
             end
             
-            // Perform addition or subtraction based on signs
+            // Perform addition or subtraction
             if ((sign_a ^ sub) == sign_b) begin
-                // Same effective sign - add mantissas
-                mant_sum = mant_a_shifted + mant_b_shifted;
+                // Same effective signs - add
+                mant_result_temp = mant_a_aligned + mant_b_aligned;
                 sign_result = sign_a;
             end else begin
-                // Different effective signs - subtract mantissas
-                if (mant_a_shifted >= mant_b_shifted) begin
-                    mant_sum = mant_a_shifted - mant_b_shifted;
+                // Different effective signs - subtract
+                if (mant_a_aligned >= mant_b_aligned) begin
+                    mant_result_temp = mant_a_aligned - mant_b_aligned;
                     sign_result = sign_a;
                 end else begin
-                    mant_sum = mant_b_shifted - mant_a_shifted;
+                    mant_result_temp = mant_b_aligned - mant_a_aligned;
                     sign_result = sign_b ^ sub;
                 end
             end
             
-            exp_result = larger_exp;
+            exp_result = {1'b0, larger_exp};
             
-            // Normalize result
-            if (mant_sum == 0) begin
+            // Normalize the result
+            if (mant_result_temp == 0) begin
                 // Result is zero
                 result = 32'b0;
-            end else if (mant_sum[24]) begin
-                // Overflow in mantissa, shift right
-                mant_result = mant_sum[23:1];
+            end
+            else if (mant_result_temp[26]) begin
+                // Carry out - shift right
+                mant_result = mant_result_temp[25:3];
                 exp_result = exp_result + 1;
-                
-                // Check for exponent overflow
-                if (exp_result >= 8'hFF) begin
+                if (exp_result >= 9'd255) begin
                     overflow = 1'b1;
-                    result = {sign_result, 8'hFF, 23'b0};  // Return infinity
+                    result = {sign_result, 8'hFF, 23'b0};
                 end else begin
-                    result = {sign_result, exp_result, mant_result};
+                    result = {sign_result, exp_result[7:0], mant_result};
                 end
-            end else begin
-                // Need to normalize by shifting left
-                norm_shift = 0;
-                for (i = 23; i >= 0; i = i - 1) begin
-                    if (mant_sum[i] && norm_shift == 0) begin
-                        norm_shift = 23 - i;
-                    end
+            end
+            else begin
+                // Count leading zeros and normalize
+                leading_zeros = 0;
+                if (mant_result_temp[25] == 1'b1) begin
+                    leading_zeros = 0;
+                end else if (mant_result_temp[24] == 1'b1) begin
+                    leading_zeros = 1;
+                end else if (mant_result_temp[23] == 1'b1) begin
+                    leading_zeros = 2;
+                end else if (mant_result_temp[22] == 1'b1) begin
+                    leading_zeros = 3;
+                end else if (mant_result_temp[21] == 1'b1) begin
+                    leading_zeros = 4;
+                end else if (mant_result_temp[20] == 1'b1) begin
+                    leading_zeros = 5;
+                end else if (mant_result_temp[19] == 1'b1) begin
+                    leading_zeros = 6;
+                end else if (mant_result_temp[18] == 1'b1) begin
+                    leading_zeros = 7;
+                end else if (mant_result_temp[17] == 1'b1) begin
+                    leading_zeros = 8;
+                end else if (mant_result_temp[16] == 1'b1) begin
+                    leading_zeros = 9;
+                end else if (mant_result_temp[15] == 1'b1) begin
+                    leading_zeros = 10;
+                end else if (mant_result_temp[14] == 1'b1) begin
+                    leading_zeros = 11;
+                end else if (mant_result_temp[13] == 1'b1) begin
+                    leading_zeros = 12;
+                end else if (mant_result_temp[12] == 1'b1) begin
+                    leading_zeros = 13;
+                end else if (mant_result_temp[11] == 1'b1) begin
+                    leading_zeros = 14;
+                end else if (mant_result_temp[10] == 1'b1) begin
+                    leading_zeros = 15;
+                end else if (mant_result_temp[9] == 1'b1) begin
+                    leading_zeros = 16;
+                end else if (mant_result_temp[8] == 1'b1) begin
+                    leading_zeros = 17;
+                end else if (mant_result_temp[7] == 1'b1) begin
+                    leading_zeros = 18;
+                end else if (mant_result_temp[6] == 1'b1) begin
+                    leading_zeros = 19;
+                end else if (mant_result_temp[5] == 1'b1) begin
+                    leading_zeros = 20;
+                end else if (mant_result_temp[4] == 1'b1) begin
+                    leading_zeros = 21;
+                end else if (mant_result_temp[3] == 1'b1) begin
+                    leading_zeros = 22;
+                end else if (mant_result_temp[2] == 1'b1) begin
+                    leading_zeros = 23;
+                end else begin
+                    leading_zeros = 24;
                 end
                 
-                if (norm_shift >= exp_result) begin
-                    // Would result in denormalized number or underflow
-                    if (exp_result == 0) begin
-                        underflow = 1'b1;
-                        result = {sign_result, 8'b0, 23'b0};  // Return zero
-                    end else begin
-                        mant_result = (mant_sum << (exp_result - 1)) & 24'h7FFFFF;
-                        result = {sign_result, 8'b0, mant_result};  // Denormalized
-                        underflow = 1'b1;
-                    end
+                // Shift left to normalize and adjust exponent
+                if (leading_zeros > exp_result) begin
+                    // Would underflow
+                    underflow = 1'b1;
+                    result = {sign_result, 8'b0, 23'b0};
                 end else begin
-                    mant_result = (mant_sum << norm_shift) & 24'h7FFFFF;
-                    exp_result = exp_result - norm_shift;
-                    result = {sign_result, exp_result, mant_result};
+                    exp_result = exp_result - leading_zeros;
+                    mant_result = (mant_result_temp << leading_zeros) >> 3;
+                    mant_result = mant_result[22:0];
+                    result = {sign_result, exp_result[7:0], mant_result};
                 end
             end
         end
